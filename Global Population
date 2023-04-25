@@ -1,0 +1,96 @@
+WITH BASE AS(SELECT country
+    , country_code
+    , unpivotted
+    FROM `bigquery-public-data.world_bank_global_population.population_by_country` a
+    --pass the table name and What common in the ("year") as it is seen first in all the tables to be transposed. 
+  , UNNEST(fhoffa.x.unpivot(a, 'year')) unpivotted
+   )
+
+  SELECT country
+, country_code 
+--unpivot the returned data in the first CTE
+,CAST (RIGHT(unpivotted.key,4) AS INT64) AS as_of_year
+-- CAST to change data type from string to INT & Separate the two data type
+,unpivotted.value AS population 
+FROM base 
+--filters data to meet criteria 
+WHERE CAST (RIGHT(unpivotted.key,4) AS INT64)  >= 2010
+
+-- reading out Health Population table 
+
+WITH CountHealth
+AS ( SELECT A.country_name
+,A.country_code
+,A.indicator_name
+,MAX(A.value) OVER (PARTITION BY A.Year) AS Highest_value
+,A.value AS country_value
+FROM bigquery-public-data.world_bank_health_population.health_nutrition_population as A
+WHERE A.year= 2018 AND A.indicator_code = "SH.XPD.CHEX.PP.CD"
+ORDER BY 1
+)
+
+SELECT *,
+--gap(difference between highest value and country value)
+(Highest_value - country_value) AS Gap
+FROM CountHealth
+
+
+
+--- Joining both global and health table
+
+WITH  base AS (
+    SELECT country
+    , country_code
+    , unpivotted
+    FROM `bigquery-public-data.world_bank_global_population.population_by_country` a
+    --pass the table name and What common in the ("year") as it is seen first in all the tables to be transposed. 
+  , UNNEST(fhoffa.x.unpivot(a, 'year')) unpivotted
+),
+
+
+pop AS (SELECT country
+, country_code 
+--unpivot the returned data in the first CTE
+,CAST (RIGHT(unpivotted.key,4) AS INT64) AS as_of_year
+,CASE WHEN unpivotted.value = 'null' THEN '0' ELSE unpivotted.value END AS population 
+FROM base 
+--filters data to meet criteria 
+WHERE CAST (RIGHT(unpivotted.key,4) AS INT64)  >= 2010 ), 
+
+--New CTE to change population data type
+pop_1 AS ( SELECT 
+country
+,country_code
+,as_of_year
+,CAST (population as FLOAT64) AS population
+--using lag function to calculate previous population by country_code
+,COALESCE (LAG (CAST (population AS FLOAT64), 1)OVER (PARTITION BY country_code ORDER BY as_of_year), 0) AS prev_population 
+ from pop )
+
+ ,Temp0 AS (SELECT *,
+--used Coalesce to get rid of null. from division
+--Used Nullif to handle error by diving by zero. 
+COALESCE (ROUND ( population /NULLIF(prev_population,0), 2 ), 0) AS change_in_population  FROM pop_1 )
+
+ , HealthExp_Cap as(SELECT A.country_name
+,A.country_code
+,A.indicator_name
+,A.year
+,A.value AS HEPC
+,COALESCE(LAG (CAST(A.value AS INT)) OVER (PARTITION BY A.country_code ORDER BY A.year),0) AS Prev_HEPC
+FROM bigquery-public-data.world_bank_health_population.health_nutrition_population as A
+WHERE A.year >=2010 AND A.indicator_code = "SH.XPD.CHEX.PP.CD"
+)
+
+ ,Temp1 AS (SELECT *,
+COALESCE(ROUND(HEPC/NullIF(Prev_HEPC,0),2),0) AS change_in_HEPC
+FROM HealthExp_Cap
+ )
+ 
+SELECT a.country, a.country_code,a.population,a.prev_population,a.change_in_population,b.HEPC,b.Prev_HEPC,b.change_in_HEPC,a.as_of_year
+FROM
+Temp0 as a LEFT JOIN Temp1 as b
+ON a.country_code = b.country_code AND
+a.as_of_year = b.year
+
+
